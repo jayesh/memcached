@@ -198,6 +198,7 @@ static void settings_init(void) {
     settings.rep_addr.s_addr = htonl(INADDR_ANY);
     settings.rep_port = 11212;
     settings.rep_qmax = 32768;
+    settings.rep_listen = false;
 #endif /* USE_REPLICATION */
 }
 
@@ -2458,7 +2459,6 @@ static void server_stats(ADD_STAT add_stats, conn *c) {
     APPEND_STAT("conn_yields", "%llu", (unsigned long long)thread_stats.conn_yields);
 #ifdef USE_REPLICATION
     APPEND_STAT("replication", "%s", "MASTER");
-    APPEND_STAT("repcached_version", "%s", REP_VERSION);
 #endif /*USE_REPLICATION*/
 
     STATS_UNLOCK();
@@ -4369,8 +4369,9 @@ static void usage(void) {
     printf("-S            Turn on Sasl authentication\n");
 #endif
 #ifdef USE_REPLICATION
-    printf("-x <ip_addr>  hostname or IP address of peer repcached\n");
+    printf("-x <ip_addr>  hostname or IP address of the replication peer\n");
     printf("-X <num>      TCP port number for replication (default: 11212)\n");
+    printf("-E            Act as replication master\n");
 #endif /* USE_REPLICATION */
 
     return;
@@ -4616,8 +4617,9 @@ int main (int argc, char **argv) {
           "S"   /* Sasl ON */
 #ifdef USE_REPLICATION
           "X:"  /* Replication port */
-          "x:"  /* Replication master */
+          "x:"  /* Replication peer */
           "q:"  /* Replication queue max */
+          "E"   /* Act as replication master */
 #endif /* USE_REPLICATION */
         ))) {
         switch (c) {
@@ -4804,6 +4806,9 @@ int main (int argc, char **argv) {
             break;
         case 'q':
             settings.rep_qmax = atoi(optarg);
+            break;
+        case 'E':
+            settings.rep_listen = true;
             break;
 #endif /* USE_REPLICATION */
 

@@ -117,7 +117,7 @@ int replication_init()
         }
     }
 
-    if (replication_server_init() == 0) {
+    if (!settings.rep_listen || replication_server_init() == 0) {
         if (start_listening) create_listening_sockets();
         // jsh: TODO remove the call below
         // and do it when we get rep_sync 

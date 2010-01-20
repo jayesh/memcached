@@ -283,6 +283,7 @@ struct settings {
     int item_size_max;        /* Maximum item size, and upper end for slabs */
     bool sasl;              /* SASL on/off */
 #ifdef USE_REPLICATION
+    bool rep_listen;
     struct in_addr rep_addr;    /* replication addr */
     int rep_port;               /* replication port */
     uint32_t rep_qmax;               /* replication QITEM max */
