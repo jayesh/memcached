@@ -18,6 +18,10 @@ memcached_SOURCES = memcached.c memcached.h \
                     util.c util.h \
                     trace.h cache.h sasl_defs.h
 
+if ENABLE_REPLICATION
+memcached_SOURCES += replication.h replication.c rep_thread.c
+endif
+
 if BUILD_CACHE
 memcached_SOURCES += cache.c
 testapp_SOURCES += cache.c

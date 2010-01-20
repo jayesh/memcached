@@ -17,6 +17,7 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <stdio.h>
 
 #include "protocol_binary.h"
 #include "cache.h"
@@ -144,6 +145,12 @@ enum conn_states {
     conn_swallow,    /**< swallowing unnecessary bytes w/o storing */
     conn_closing,    /**< closing this connection */
     conn_mwrite,     /**< writing out many items sequentially */
+#ifdef USE_REPLICATION
+    conn_repconnect, /* replication */
+    conn_rep_listen, /* */
+    conn_rep_start,   /* */
+    conn_rep_send,   /* */
+#endif /* USE_REPLICATION */
     conn_max_state   /**< Max state value (used for assertion) */
 };
 
@@ -275,6 +282,11 @@ struct settings {
     int backlog;
     int item_size_max;        /* Maximum item size, and upper end for slabs */
     bool sasl;              /* SASL on/off */
+#ifdef USE_REPLICATION
+    struct in_addr rep_addr;    /* replication addr */
+    int rep_port;               /* replication port */
+    uint32_t rep_qmax;               /* replication QITEM max */
+#endif /*USE_REPLICATION*/
 };
 
 extern struct stats stats;
@@ -286,6 +298,10 @@ extern struct settings settings;
 
 /* temp */
 #define ITEM_SLABBED 4
+
+#define ITEM_REPQUEUED (1 << 5)
+#define ITEM_REPDATA  (1 << 6)
+#define ITEM_REPDIRTY  (1 << 7)
 
 /**
  * Structure for storing items within memcached.
@@ -429,6 +445,7 @@ enum delta_result_type do_add_delta(conn *c, item *item, const bool incr,
                                     const int64_t delta, char *buf);
 enum store_item_type do_store_item(item *item, int comm, conn* c);
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
+conn *conn_new_timeout(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base, struct timeval *timeout);
 extern int daemonize(int nochdir, int noclose);
 
 
@@ -440,6 +457,11 @@ extern int daemonize(int nochdir, int noclose);
 #include "hash.h"
 #include "util.h"
 
+#ifdef USE_REPLICATION
+#include "replication.h"
+#endif /* USE_REPLICATION */
+
+
 /*
  * Functions such as the libevent-related calls that need to do cross-thread
  * communication in multithreaded mode (rather than actually doing the work
@@ -450,6 +472,12 @@ extern int daemonize(int nochdir, int noclose);
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport);
+
+bool update_event(conn *c, const int new_flags);
+int server_socket(int port, enum network_transport transport,
+                  FILE *portnumber_file, conn **conn_list, 
+                  enum conn_states init_state);
+void create_listening_sockets(void);
 
 /* Lock wrappers for cache functions that are called from main loop. */
 enum delta_result_type add_delta(conn *c, item *item, const int incr,

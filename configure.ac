@@ -382,6 +382,13 @@ if test "x$ac_cv_search_pthread_create" = "xno"; then
   AC_MSG_ERROR([Can't enable threads without the POSIX thread library.])
 fi
 
+dnl Check whether the user wants replication or not
+AC_ARG_ENABLE(replication,
+  [AS_HELP_STRING([--enable-replication],[support replication])],
+  [AC_DEFINE([USE_REPLICATION],,[Define this if you want to use replication])])
+
+AM_CONDITIONAL(ENABLE_REPLICATION, test "x$enable_replication" = "xyes")
+
 AC_CHECK_FUNCS(mlockall)
 AC_CHECK_FUNCS(getpagesizes)
 AC_CHECK_FUNCS(memcntl)

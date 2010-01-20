@@ -180,9 +180,10 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
              * three hours, so if we find one in the tail which is that old,
              * free it anyway.
              */
+            // jsh: TODO review - do not free it if dirty
             tries = 50;
             for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
-                if (search->refcount != 0 && search->time + TAIL_REPAIR_TIME < current_time) {
+                if (search->refcount != 0 && search->time + TAIL_REPAIR_TIME < current_time && (search->it_flags & (ITEM_REPDIRTY | ITEM_REPQUEUED)) == 0) {
                     itemstats[id].tailrepairs++;
                     search->refcount = 0;
                     do_item_unlink(search);
@@ -209,6 +210,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     it->nkey = nkey;
     it->nbytes = nbytes;
     memcpy(ITEM_key(it), key, nkey);
+    *(ITEM_key(it) + nkey) = '\0';
     it->exptime = exptime;
     memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
     it->nsuffix = nsuffix;
@@ -299,7 +301,9 @@ int do_item_link(item *it) {
     STATS_UNLOCK();
 
     /* Allocate a new CAS ID on link. */
-    ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+    if ((it->it_flags & ITEM_REPDATA) == 0) {
+        ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+    }
 
     item_link_q(it);
 

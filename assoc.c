@@ -26,6 +26,7 @@
 #include <pthread.h>
 
 static pthread_cond_t maintenance_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t maintenance_done_cond = PTHREAD_COND_INITIALIZER;
 
 
 typedef  unsigned long  int  ub4;   /* unsigned 4-byte quantities */
@@ -57,6 +58,9 @@ static bool expanding = false;
  * far we've gotten so far. Ranges from 0 .. hashsize(hashpower - 1) - 1.
  */
 static unsigned int expand_bucket = 0;
+
+/* Indicates whether we are in the middle of hash table iteration */
+static bool hash_iter_in_progress = false;
 
 void assoc_init(void) {
     primary_hashtable = calloc(hashsize(hashpower), sizeof(void *));
@@ -117,6 +121,10 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
 
 /* grows the hashtable to the next power of 2. */
 static void assoc_expand(void) {
+    // Dont start expansion if we are in the middle of 
+    // hash table iteration
+    if (hash_iter_in_progress) return;
+
     old_hashtable = primary_hashtable;
 
     primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
@@ -220,6 +228,7 @@ static void *assoc_maintenance_thread(void *arg) {
 
         if (!expanding) {
             /* We are done expanding.. just wait for next invocation */
+            pthread_cond_signal(&maintenance_done_cond);
             pthread_cond_wait(&maintenance_cond, &cache_lock);
         }
 
@@ -257,4 +266,53 @@ void stop_assoc_maintenance_thread() {
     pthread_join(maintenance_tid, NULL);
 }
 
+bool assoc_hash_iterate(HASH_ITER_FN iter_fn, void *data) 
+{
+    int bucket = 0;
+    bool ret = true;
 
+    pthread_mutex_lock(&cache_lock);
+    
+    // if the hash table is being expanded, we can iterate reliably only
+    // on the old hash table. So wait till the expansion finishes.
+    if (expanding) {
+        pthread_cond_wait(&maintenance_done_cond, &cache_lock);
+    }
+
+    // Indicate we are iterating the hash table so that expansion 
+    // doesnt kick in
+    hash_iter_in_progress = true;
+
+    while (true) {
+        int i;
+
+        for (i = 0; i < hash_bulk_move && hash_iter_in_progress; ++i) {
+            item *it, *next;
+
+            for (it = primary_hashtable[bucket]; NULL != it; it = next) {
+                next = it->h_next;
+
+                ret = iter_fn(it, data);
+                if (!ret) {
+                    hash_iter_in_progress = false;
+                    break;
+                }
+            }
+
+            if (ret) {
+                bucket++;
+                if (bucket == hashsize(hashpower)) {
+                    hash_iter_in_progress = false;
+                }
+            }
+        }
+
+        pthread_mutex_unlock(&cache_lock);
+
+        if (!hash_iter_in_progress) break;
+
+        pthread_mutex_lock(&cache_lock);
+    }
+
+    return ret;
+}
