@@ -2458,7 +2458,9 @@ static void server_stats(ADD_STAT add_stats, conn *c) {
     APPEND_STAT("threads", "%d", settings.num_threads);
     APPEND_STAT("conn_yields", "%llu", (unsigned long long)thread_stats.conn_yields);
 #ifdef USE_REPLICATION
-    APPEND_STAT("replication", "%s", "MASTER");
+    APPEND_STAT("replication", "%s", 
+                settings.rep_listen? "MASTER": 
+                    settings.rep_addr.s_addr != htonl(INADDR_ANY)? "SLAVE": "OFF" );
 #endif /*USE_REPLICATION*/
 
     STATS_UNLOCK();
