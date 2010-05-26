@@ -694,27 +694,29 @@ static void conn_close(conn *c) {
     MEMCACHED_CONN_RELEASE(c->sfd);
     close(c->sfd);
 
-    LOCK_THREAD(c->thread);
-    /* remove from pending-io list */
-    conn* pending = c->thread->pending_io;
-    conn* prev = NULL;
-    while (pending) {
-        if (pending == c) {
-            if (settings.verbose > 1) {
-                settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
-                                                "Current connection was in the pending-io list.. Nuking it\n");
+    if (c->thread != NULL) {
+        LOCK_THREAD(c->thread);
+        /* remove from pending-io list */
+        conn* pending = c->thread->pending_io;
+        conn* prev = NULL;
+        while (pending) {
+            if (pending == c) {
+                if (settings.verbose > 1) {
+                    settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
+                                                    "Current connection was in the pending-io list.. Nuking it\n");
+                }
+                if (prev == NULL) {
+                    c->thread->pending_io = c->next;
+                } else {
+                    prev->next = c->next;
+                }
             }
-            if (prev == NULL) {
-                c->thread->pending_io = c->next;
-            } else {
-                prev->next = c->next;
-            }
+            prev = pending;
+            pending = pending->next;
         }
-        prev = pending;
-        pending = pending->next;
-    }
 
-    UNLOCK_THREAD(c->thread);
+        UNLOCK_THREAD(c->thread);
+    }
 
     conn_cleanup(c);
 
