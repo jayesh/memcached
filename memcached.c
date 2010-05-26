@@ -2187,6 +2187,27 @@ struct tap_stats {
     struct tap_cmd_stats received;
 } tap_stats = { .mutex = PTHREAD_MUTEX_INITIALIZER };
 
+static void move_conn_to_tap_thread(conn *c, STATE_FUNC state) {
+    LIBEVENT_THREAD *tp = &tap_thread;
+    c->ewouldblock = true;
+
+    event_del(&c->event);
+
+    LOCK_THREAD(tp);
+    conn_set_state(c, state);
+    c->thread = tp;
+    c->event.ev_base = tp->base;
+    assert(c->next == NULL);
+    c->next = tap_thread.pending_io;
+    tp->pending_io = c;
+    assert(number_of_pending(c, tp->pending_io) == 1);
+    UNLOCK_THREAD(tp);
+
+    if (write(tp->notify_send_fd, "", 1) != 1) {
+        perror("Writing to tap thread notify pipe");
+    }
+}
+
 static void send_tap_connect(conn *c) {
     protocol_binary_request_tap_connect msg = {
         .message.header.request.magic = (uint8_t)PROTOCOL_BINARY_REQ,
@@ -4910,25 +4931,7 @@ bool conn_closing(conn *c) {
 }
 
 bool conn_add_tap_client(conn *c) {
-    LIBEVENT_THREAD *tp = &tap_thread;
-    c->ewouldblock = true;
-
-    event_del(&c->event);
-
-    LOCK_THREAD(tp);
-    conn_set_state(c, conn_ship_log);
-    c->thread = tp;
-    c->event.ev_base = tp->base;
-    assert(c->next == NULL);
-    c->next = tap_thread.pending_io;
-    tp->pending_io = c;
-    assert(number_of_pending(c, tp->pending_io) == 1);
-    UNLOCK_THREAD(tp);
-
-    if (write(tp->notify_send_fd, "", 1) != 1) {
-        perror("Writing to tap thread notify pipe");
-    }
-
+    move_conn_to_tap_thread(c, conn_ship_log);
     return false;
 }
 
