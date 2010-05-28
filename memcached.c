@@ -817,6 +817,8 @@ static const char *state_text(STATE_FUNC state) {
         return "conn_closing";
     } else if (state == conn_mwrite) {
         return "conn_mwrite";
+    } else if (state == conn_tap_connecting) {
+        return "conn_tap_connecting";
     } else if (state == conn_create_tap_connect) {
         return "conn_create_tap_connect";
     } else if (state == conn_ship_log) {
@@ -4630,6 +4632,15 @@ bool conn_listening(conn *c)
 }
 
 bool conn_create_tap_connect(conn *c) {
+    if (c->thread != &tap_thread) {
+        if (settings.verbose > 2) {
+            settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
+                                            "%d: migrating to tap_thread\n", c->sfd);
+        }
+        move_conn_to_tap_thread(c, conn_create_tap_connect);
+        return false;
+    }
+
     send_tap_connect(c);
     return true;
 }
@@ -5170,13 +5181,57 @@ static int server_socket(int port, enum network_transport transport,
     return success == 0;
 }
 
+bool conn_tap_connecting(conn *c) {
+    assert(c != NULL);
+
+    int error;
+    socklen_t errsz = sizeof(error);
+
+    do {
+        if (c->which == EV_TIMEOUT) {
+            settings.extensions.logger->log(EXTENSION_LOG_INFO, c,
+                                            "%d: connection timed out\n", c->sfd);
+            break;
+        }
+
+        /* Check if the connection completed */
+        if (getsockopt(c->sfd, SOL_SOCKET, SO_ERROR, (void*)&error,
+                       &errsz) == -1) {
+            settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
+                                            "getsockopt(): %s\n", strerror(errno));
+            break;
+        }
+
+        if (error) {
+            settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
+                                            "%d: connect failed\n", c->sfd);
+            break;
+        }
+
+        /* We are connected to the server now */
+        if (settings.verbose > 2) {
+            settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
+                                            "%d: connected\n", c->sfd);
+        }
+
+        conn_set_state(c, conn_create_tap_connect);
+        return true;
+
+    } while (0);
+
+    conn_set_state(c, conn_closing);
+    update_event(c, 0);
+    return true;
+}
+
 /**
  * Create a connection to a remote host
- * @todo document me...
+ * @param remote the server to connect to in host:port format
+ * @param status status of the connection 0: connected, 1: in progress, -1: error
+ * @return the socket descriptor
  */
-static int remote_connection(const char *remote, STATE_FUNC state) {
-    int ret = -1;
-    int sock;
+static int remote_connection(const char *remote, int *status) {
+    int sock = -1;
     int error;
     int flags;
     struct addrinfo *ai;
@@ -5195,6 +5250,7 @@ static int remote_connection(const char *remote, STATE_FUNC state) {
         port = (char*)default_port;
     }
 
+    *status = -1;
     error= getaddrinfo(host, port, &hints, &ai);
     if (error != 0) {
         if (error != EAI_SYSTEM) {
@@ -5215,25 +5271,34 @@ static int remote_connection(const char *remote, STATE_FUNC state) {
             continue;
         }
 
-        if (connect(sock, ai->ai_addr, ai->ai_addrlen) == -1) {
+        if ((flags = fcntl(sock, F_GETFL, 0)) < 0 ||
+            fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                            "Failed to connect socket: %s\n",
+                                            "Failed to set O_NONBLOCK: %s\n",
                                             strerror(errno));
             close(sock);
             sock = -1;
             continue;
         }
 
-        if ((flags = fcntl(sock, F_GETFL, 0)) < 0 ||
-            fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-            perror("setting O_NONBLOCK");
-            close(sock);
-            continue;
+        if (connect(sock, ai->ai_addr, ai->ai_addrlen) < 0) {
+            if (errno == EINPROGRESS) {
+                *status = 1;
+            } else if (errno == EISCONN) { /* we are connected */
+                *status = 0;
+            } else {
+                settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
+                                                "Failed to connect socket: %s\n",
+                                                strerror(errno));
+                close(sock);
+                sock = -1;
+                *status = -1;
+                continue;
+            }
+        } else {
+            *status = 0;
         }
 
-        dispatch_conn_new(sock, state, EV_WRITE |EV_READ | EV_PERSIST,
-                          DATA_BUFFER_SIZE, tcp_transport);
-        ret = 0;
         break;
     }
 
@@ -5242,7 +5307,14 @@ static int remote_connection(const char *remote, STATE_FUNC state) {
         free(host);
     }
 
-    return ret;
+    if (settings.verbose > 2) {
+        settings.extensions.logger->log(EXTENSION_LOG_DEBUG, NULL,
+              "Connection to %s - fd: %d, status: %s\n",
+              remote, sock, *status == 0? "CONNECTED":
+                            (*status == 1?"IN_PROGRESS": "FAILED"));
+    }
+
+    return sock;
 }
 
 static int new_socket_unix(void) {
@@ -5677,6 +5749,30 @@ static void count_eviction(const void *cookie, const void *key, const int nkey) 
     topkeys_t *tk = get_independent_stats((conn*)cookie)->topkeys;
     TK(tk, evictions, key, nkey, get_current_time());
 }
+
+static int tap_connect(const char *remote, int conn_timeout) {
+    int sock = -1;
+    int status = -1;
+
+    if ((sock = remote_connection(remote, &status)) == -1) {
+        settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
+                                        "Failed connecting to: %s\n", remote);
+    } else {
+        assert(status >= 0);
+        struct timeval timeout = { .tv_sec = conn_timeout/1000,
+                                   .tv_usec = (conn_timeout % 1000) * 1000 };
+        conn *c = conn_new(sock, status == 0? conn_create_tap_connect: conn_tap_connecting,
+                           EV_WRITE | EV_READ | EV_PERSIST,
+                           DATA_BUFFER_SIZE,
+                           tcp_transport,
+                           main_base,
+                           status == 0? NULL: &timeout);
+        return c != NULL? 0: -1;
+    }
+
+    return -1;
+}
+
 
 /**
  * To make it easy for engine implementors that doesn't want to care about
@@ -6586,29 +6682,29 @@ int main (int argc, char **argv) {
         }
     }
 
-    if (overlord) {
 #ifndef __WIN32__
-        struct utsname utsname;
-        if (uname(&utsname) != -1) {
-            char port[12];
-            snprintf(port, sizeof(port), ":%u", settings.port);
-            nodeid = malloc(strlen(utsname.nodename) + strlen(port) + 1);
-            if (nodeid) {
-                sprintf(nodeid, "%s%s", utsname.nodename, port);
-            }
-        } else {
-            settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                            "Failed to get uname: %s\n", strerror(errno));
+    struct utsname utsname;
+    if (uname(&utsname) != -1) {
+        char port[12];
+        snprintf(port, sizeof(port), ":%u", settings.port);
+        nodeid = malloc(strlen(utsname.nodename) + strlen(port) + 1);
+        if (nodeid) {
+            sprintf(nodeid, "%s%s", utsname.nodename, port);
         }
+    } else {
+        settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
+                                        "Failed to get uname: %s\n", strerror(errno));
+    }
 
-        if (remote_connection(overlord, conn_create_tap_connect) == -1) {
+    if (overlord) {
+        if (tap_connect(overlord, 30000) < 0) {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                                             "Failed to start tap consumer\n");
         }
         // @TODO we need an observer to determine when the socket close and
         // when to switch state
-#endif
     }
+#endif
 
     /* Drop privileges no longer needed */
     drop_privileges();
