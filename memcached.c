@@ -5465,6 +5465,8 @@ static void clock_handler(const int fd, const short which, void *arg) {
     evtimer_add(&clockevent, &t);
 
     set_current_time();
+
+    perform_callbacks(ON_TIMER, NULL, NULL);
 }
 
 static void usage(void) {

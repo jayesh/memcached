@@ -14,10 +14,11 @@ extern "C" {
         ON_AUTH        = 2,     /**< A connection was authenticated. */
         ON_SWITCH_CONN = 3,     /**< Processing a different connection on this thread. */
         ON_TAP_CONNECT = 4,     /**< A tap connection was established */
-        ON_TAP_TIMEOUT = 5      /**< A tap connection was timed out */
+        ON_TAP_TIMEOUT = 5,     /**< A tap connection was timed out */
+        ON_TIMER       = 6      /**< 1 sec timer event */
     } ENGINE_EVENT_TYPE;
 
-    #define MAX_ENGINE_EVENT_TYPE 5
+    #define MAX_ENGINE_EVENT_TYPE 6
 
     /**
      * Callback for server events.
