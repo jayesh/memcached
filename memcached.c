@@ -186,6 +186,9 @@ static enum try_read_result try_read_udp(conn *c);
 
 static void conn_set_state(conn *c, STATE_FUNC state);
 
+static void store_engine_specific(const void *cookie, void *engine_data);
+static void *get_engine_specific(const void *cookie);
+
 /* stats */
 static void stats_init(void);
 static void server_stats(ADD_STAT add_stats, conn *c, bool aggregate);
@@ -2218,18 +2221,39 @@ static void send_tap_connect(conn *c) {
 
     char *backfill;
     uint64_t backfillage;
+    void *userdata = NULL;
     size_t nuserdata = 0;
+    uint32_t flags = 0;
 
-    if ((backfill = getenv("MEMCACHED_TAP_BACKFILL_AGE")) != NULL) {
+    tap_connection_data_t *conn_data;
+    conn_data = get_engine_specific(c);
+    store_engine_specific(c, NULL);
+
+    if (conn_data != NULL) {
+        flags = conn_data->flags;
+        userdata = conn_data->userdata;
+        nuserdata = conn_data->nuserdata;
+    } else if ((backfill = getenv("MEMCACHED_TAP_BACKFILL_AGE")) != NULL) {
         if (safe_strtoull(backfill, &backfillage)) {
-            msg.message.header.request.extlen = 4;
-            msg.message.body.flags = htonl(TAP_CONNECT_FLAG_BACKFILL);
+            flags = TAP_CONNECT_FLAG_BACKFILL;
             backfillage = ntohll(backfillage);
+            userdata = &backfillage;
             nuserdata = sizeof(backfillage);
         } else {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
                                             "Failed to parse backfill age: %s\n", backfill);
         }
+     }
+
+    if (settings.verbose > 2) {
+        settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
+                                        "%d: on_tap_connect - flags: %x, nuserdata: %d\n",
+                                        c->sfd, flags, (int)nuserdata);
+    }
+
+    if (flags != 0) {
+        msg.message.header.request.extlen = 4;
+        msg.message.body.flags = htonl(flags);
     }
 
     size_t nodelen = 0;
@@ -2250,6 +2274,10 @@ static void send_tap_connect(conn *c) {
                                             "%d: Failed to create output headers\n", c->sfd);
         }
         conn_set_state(c, conn_closing);
+        /* Not really a connection timeout but let us know the
+           engine about the failure
+         */
+        perform_callbacks(ON_TAP_TIMEOUT, conn_data, c);
         return ;
     }
 
@@ -2263,14 +2291,15 @@ static void send_tap_connect(conn *c) {
     }
 
     if (nuserdata != 0) {
-        if (ntohl(msg.message.body.flags) & TAP_CONNECT_FLAG_BACKFILL) {
-            memcpy(c->wcurr + c->wbytes, &backfillage, sizeof(backfillage));
-            c->wbytes += sizeof(backfillage);
-        }
+        assert(c->wbytes + nuserdata < c->wsize);
+        memcpy(c->wcurr + c->wbytes, userdata, nuserdata);
+        c->wbytes += nuserdata;
     }
 
     conn_set_state(c, conn_write);
     c->write_and_go = conn_new_cmd;
+
+    perform_callbacks(ON_TAP_CONNECT, conn_data, c);
 
     pthread_mutex_lock(&tap_stats.mutex);
     tap_stats.sent.connect++;
@@ -5219,6 +5248,10 @@ bool conn_tap_connecting(conn *c) {
 
     } while (0);
 
+    void *conn_data = get_engine_specific(c);
+    store_engine_specific(c, NULL);
+    perform_callbacks(ON_TAP_TIMEOUT, conn_data, c);
+
     conn_set_state(c, conn_closing);
     update_event(c, 0);
     return true;
@@ -5750,7 +5783,9 @@ static void count_eviction(const void *cookie, const void *key, const int nkey) 
     TK(tk, evictions, key, nkey, get_current_time());
 }
 
-static int tap_connect(const char *remote, int conn_timeout) {
+static int tap_connect(const char *remote,
+                       int conn_timeout,
+                       tap_connection_data_t *conn_data) {
     int sock = -1;
     int status = -1;
 
@@ -5767,7 +5802,10 @@ static int tap_connect(const char *remote, int conn_timeout) {
                            tcp_transport,
                            main_base,
                            status == 0? NULL: &timeout);
-        return c != NULL? 0: -1;
+        if (c != NULL) {
+            store_engine_specific(c, conn_data);
+            return 0;
+        }
     }
 
     return -1;
@@ -6038,7 +6076,8 @@ static SERVER_HANDLE_V1 *get_server_api(void)
         .realtime = realtime,
         .notify_io_complete = notify_io_complete,
         .get_current_time = get_current_time,
-        .parse_config = parse_config
+        .parse_config = parse_config,
+        .tap_connect = tap_connect
     };
 
     static SERVER_STAT_API server_stat_api = {
@@ -6572,26 +6611,6 @@ int main (int argc, char **argv) {
     /* initialize main thread libevent instance */
     main_base = event_init();
 
-    /* Load the storage engine */
-    ENGINE_HANDLE *engine_handle = NULL;
-    if (!load_engine(engine,get_server_api,settings.extensions.logger,&engine_handle)) {
-        /* Error already reported */
-        exit(EXIT_FAILURE);
-    }
-
-    if(!init_engine(engine_handle,engine_config,settings.extensions.logger)) {
-        return false;
-    }
-
-    if(settings.verbose > 0) {
-        log_engine_details(engine_handle,settings.extensions.logger);
-    }
-    settings.engine.v1 = (ENGINE_HANDLE_V1 *) engine_handle;
-
-    if (settings.engine.v1->arithmetic == NULL) {
-        settings.engine.v1->arithmetic = internal_arithmetic;
-    }
-
     /* initialize other stuff */
     stats_init();
 
@@ -6615,6 +6634,26 @@ int main (int argc, char **argv) {
         exit(EX_OSERR);
     }
 #endif
+
+    /* Load the storage engine */
+    ENGINE_HANDLE *engine_handle = NULL;
+    if (!load_engine(engine,get_server_api,settings.extensions.logger,&engine_handle)) {
+        /* Error already reported */
+        exit(EXIT_FAILURE);
+    }
+
+    if(!init_engine(engine_handle,engine_config,settings.extensions.logger)) {
+        return false;
+    }
+
+    if(settings.verbose > 0) {
+        log_engine_details(engine_handle,settings.extensions.logger);
+    }
+    settings.engine.v1 = (ENGINE_HANDLE_V1 *) engine_handle;
+
+    if (settings.engine.v1->arithmetic == NULL) {
+        settings.engine.v1->arithmetic = internal_arithmetic;
+    }
 
     /* start up worker threads if MT mode */
     thread_init(settings.num_threads, main_base);
@@ -6697,7 +6736,7 @@ int main (int argc, char **argv) {
     }
 
     if (overlord) {
-        if (tap_connect(overlord, 30000) < 0) {
+        if (tap_connect(overlord, 30000, NULL) < 0) {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                                             "Failed to start tap consumer\n");
         }

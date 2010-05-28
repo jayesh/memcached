@@ -12,10 +12,12 @@ extern "C" {
         ON_CONNECT     = 0,     /**< A new connection was established. */
         ON_DISCONNECT  = 1,     /**< A connection was terminated. */
         ON_AUTH        = 2,     /**< A connection was authenticated. */
-        ON_SWITCH_CONN = 3     /**< Processing a different connection on this thread. */
+        ON_SWITCH_CONN = 3,     /**< Processing a different connection on this thread. */
+        ON_TAP_CONNECT = 4,     /**< A tap connection was established */
+        ON_TAP_TIMEOUT = 5      /**< A tap connection was timed out */
     } ENGINE_EVENT_TYPE;
 
-    #define MAX_ENGINE_EVENT_TYPE 4
+    #define MAX_ENGINE_EVENT_TYPE 5
 
     /**
      * Callback for server events.

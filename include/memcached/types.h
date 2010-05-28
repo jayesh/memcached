@@ -80,6 +80,13 @@ extern "C" {
         const char *config;
     } auth_data_t;
 
+    typedef struct {
+        uint32_t flags;
+        void *userdata;
+        size_t nuserdata;
+        void *engine_specific;
+    } tap_connection_data_t;
+
     /* Forward declaration of the server handle -- to be filled in later */
     typedef struct server_handle_v1_t SERVER_HANDLE_V1;
 

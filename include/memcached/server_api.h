@@ -95,6 +95,16 @@ extern "C" {
         void (*notify_io_complete)(const void *cookie,
                                    ENGINE_ERROR_CODE status);
 
+
+        /**
+         * Create a tap connection to a remote server
+         * @param remote the host to connect to in the form <host>:<port>
+         * @param timeout connection timeout in milliseconds
+         * @param conn_data tap connection data
+         */
+        int (*tap_connect)(const char *remote, int timeout, tap_connection_data_t *conn_data);
+
+
     } SERVER_CORE_API;
 
     typedef struct {
